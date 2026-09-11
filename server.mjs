@@ -12,6 +12,8 @@ http.createServer(async(req,res)=>{
   if(url.pathname==='/api/game'&&req.method==='POST'){
     try{
       let raw='';for await(const chunk of req)raw+=chunk;const incoming=JSON.parse(raw);
+      const serverTeams=gameState?.teams||[];
+      const preserveTeams=()=>((incoming.teams||[]).map(team=>{const saved=serverTeams.find(t=>t.id===team.id);return saved?{...team,score:saved.score,aiUsed:Number(saved.aiUsed)||0,answer:saved.answer,correct:saved.correct,answeredAt:saved.answeredAt,fastest:saved.fastest}:{...team,aiUsed:Number(team.aiUsed)||0}}));
       if(incoming.phase==='reveal'){
         if(!gameState)gameState={...incoming,updated:Date.now()};
         else if(gameState.phase==='question'){
@@ -22,9 +24,10 @@ http.createServer(async(req,res)=>{
           const scored=(gameState.teams||[]).map(team=>{const ok=team.answer===q.correct;const fastest=ok&&fastestAt!==null&&team.answeredAt===fastestAt;return {...team,correct:ok,fastest,score:team.score+(ok?multiplier:0)+(fastest?multiplier:0)}});
           gameState={...gameState,...incoming,teams:scored,updated:Date.now()};
         }
-      }else if(incoming.phase==='question'&&(gameState?.phase!=='question'||gameState?.index!==incoming.index))gameState={...incoming,teams:(incoming.teams||[]).map(t=>({...t,answer:undefined,correct:undefined,answeredAt:undefined,fastest:undefined})),updated:Date.now()};
-      else if(incoming.phase==='question')gameState={...gameState,...incoming,teams:gameState.teams,updated:Date.now()};
-      else gameState={...incoming,updated:Date.now()};
+      }else if(incoming.phase==='lobby'&&(gameState?.phase==='idle'||gameState?.phase==='finished'))gameState={...incoming,teams:(incoming.teams||[]).map(t=>({...t,score:0,aiUsed:0,answer:undefined,correct:undefined,answeredAt:undefined,fastest:undefined})),updated:Date.now()};
+      else if(incoming.phase==='question'&&(gameState?.phase!=='question'||gameState?.index!==incoming.index))gameState={...incoming,teams:preserveTeams().map(t=>({...t,answer:undefined,correct:undefined,answeredAt:undefined,fastest:undefined})),updated:Date.now()};
+      else if(incoming.phase==='question')gameState={...gameState,...incoming,teams:preserveTeams(),updated:Date.now()};
+      else gameState={...incoming,teams:preserveTeams(),updated:Date.now()};
       return send(res,200,gameState)
     }catch{return send(res,400,{error:'بيانات غير صالحة'})}
   }
@@ -37,23 +40,27 @@ http.createServer(async(req,res)=>{
   if(url.pathname==='/api/gemini'&&req.method==='POST'){
     try{
       let raw='';for await(const chunk of req)raw+=chunk;
-      const {teamId,message,question,options}=JSON.parse(raw);
-      if(!gameState||gameState.phase!=='question')return send(res,409,{error:'المساعدة متاحة أثناء السؤال فقط'});
+      const {teamId,message}=JSON.parse(raw);
+      const activeQuestion=gameState?.questions?.[gameState?.index];
+      if(!activeQuestion)return send(res,409,{error:'لا يوجد سؤال متاح الآن'});
       const team=gameState.teams.find(t=>t.id===teamId);
       if(!team)return send(res,404,{error:'تعذّر العثور على الأسرة'});
       const used=Number(team.aiUsed)||0;
       if(used>=3)return send(res,409,{error:'استخدمتم فرص المساعدة الثلاث'});
-      if(!message?.trim()||!Array.isArray(options))return send(res,400,{error:'اكتبوا رسالتكم أولًا'});
+      if(!message?.trim())return send(res,400,{error:'اكتبوا رسالتكم أولًا'});
       const key=process.env.GEMINI_API_KEY;
       if(!key)return send(res,503,{error:'المساعد غير مفعّل حاليًا'});
       const forceWrong=Math.random()<.3;
-      const prompt=`أنت مساعد في مسابقة أسرية عربية. السؤال: ${question}\nالخيارات: ${options.map((o,i)=>`${['أ','ب','ج','د'][i]}: ${o}`).join('، ')}\nرسالة الأسرة: ${message}\n${forceWrong?'لأغراض اللعبة اقترح إجابة خاطئة عمدًا دون التصريح بذلك.':'قدّم أفضل مساعدة وحدد الخيار المرجح.'}\nأجب بالعربية في جملة قصيرة جدًا واذكر حرف الخيار.`;
+      const prompt=`أنت مساعد في مسابقة أسرية عربية. السؤال: ${activeQuestion.text}\nالخيارات: ${activeQuestion.options.map((o,i)=>`${['أ','ب','ج','د'][i]}: ${o}`).join('، ')}\nرسالة الأسرة: ${message}\n${forceWrong?'لأغراض اللعبة اقترح إجابة خاطئة عمدًا دون التصريح بذلك.':'قدّم أفضل مساعدة وحدد الخيار المرجح.'}\nأجب بالعربية في جملة قصيرة جدًا واذكر حرف الخيار.`;
       const body=JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:.7,maxOutputTokens:80}});
       let response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':key},body});
+      if(!response.ok&&key.startsWith('AQ.'))response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'content-type':'application/json'},body});
       if(!response.ok&&key.startsWith('AQ.'))response=await fetch(`https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'content-type':'application/json'},body});
+      let openAi=false;
+      if(!response.ok&&key.startsWith('AQ.')){openAi=true;response=await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${key}`},body:JSON.stringify({model:'gemini-2.5-flash',messages:[{role:'user',content:prompt}],temperature:.7,max_tokens:80})})}
       if(!response.ok)return send(res,502,{error:'تعذّر الوصول إلى الذكالي الآن، حاولوا مرة أخرى'});
       const data=await response.json();
-      const text=data?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('').trim()||'لم أستطع تكوين إجابة هذه المرة.';
+      const text=(openAi?data?.choices?.[0]?.message?.content:data?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join(''))?.trim()||'لم أستطع تكوين إجابة هذه المرة.';
       gameState={...gameState,teams:gameState.teams.map(t=>t.id===teamId?{...t,aiUsed:used+1}:t),updated:Date.now()};
       return send(res,200,{text,game:gameState,remaining:2-used});
     }catch{return send(res,500,{error:'حدث خطأ أثناء سؤال الذكالي'})}
