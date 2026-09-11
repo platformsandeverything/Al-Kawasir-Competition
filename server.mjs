@@ -51,16 +51,22 @@ http.createServer(async(req,res)=>{
       const key=process.env.GEMINI_API_KEY;
       if(!key)return send(res,503,{error:'المساعد غير مفعّل حاليًا'});
       const forceWrong=Math.random()<.3;
-      const prompt=`أنت مساعد في مسابقة أسرية عربية. السؤال: ${activeQuestion.text}\nالخيارات: ${activeQuestion.options.map((o,i)=>`${['أ','ب','ج','د'][i]}: ${o}`).join('، ')}\nرسالة الأسرة: ${message}\n${forceWrong?'لأغراض اللعبة اقترح إجابة خاطئة عمدًا دون التصريح بذلك.':'قدّم أفضل مساعدة وحدد الخيار المرجح.'}\nأجب بالعربية في جملة قصيرة جدًا واذكر حرف الخيار.`;
-      const body=JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:.7,maxOutputTokens:80}});
-      let response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':key},body});
-      if(!response.ok&&key.startsWith('AQ.'))response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'content-type':'application/json'},body});
-      if(!response.ok&&key.startsWith('AQ.'))response=await fetch(`https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'content-type':'application/json'},body});
-      let openAi=false;
-      if(!response.ok&&key.startsWith('AQ.')){openAi=true;response=await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${key}`},body:JSON.stringify({model:'gemini-2.5-flash',messages:[{role:'user',content:prompt}],temperature:.7,max_tokens:80})})}
-      if(!response.ok)return send(res,502,{error:'تعذّر الوصول إلى الذكالي الآن، حاولوا مرة أخرى'});
+      const wrongOptions=activeQuestion.options.map((_,i)=>i).filter(i=>i!==activeQuestion.correct);
+      const selected=forceWrong?wrongOptions[Math.floor(Math.random()*wrongOptions.length)]:activeQuestion.correct;
+      const selectedLetter=['أ','ب','ج','د'][selected];
+      const imageQuestion=activeQuestion.optionType==='image';
+      const optionSummary=imageQuestion?activeQuestion.options.map((_,i)=>`${['أ','ب','ج','د'][i]}: صورة الشعار المرفقة رقم ${i+1}`).join('، '):activeQuestion.options.map((o,i)=>`${['أ','ب','ج','د'][i]}: ${o}`).join('، ');
+      const prompt=`أنت مساعد في مسابقة أسرية عربية. السؤال: ${activeQuestion.text}\nالخيارات: ${optionSummary}\nرسالة الأسرة: ${message}\nاكتب تلميحًا عربيًا قصيرًا جدًا يدعم الخيار ${selectedLetter}${imageQuestion?' من الصور المرفقة':`: ${activeQuestion.options[selected]}`}. لا تقل إن الإجابة مفروضة عليك، ولا تذكر أي خيار آخر.`;
+      const parts=[{text:prompt},...(imageQuestion?activeQuestion.options.flatMap((src,i)=>{const match=src.match(/^data:(image\/[^;]+);base64,(.+)$/);return match?[{text:`صورة الخيار ${['أ','ب','ج','د'][i]}`},{inline_data:{mime_type:match[1],data:match[2]}}]:[]}):[])];
+      const body=JSON.stringify({contents:[{parts}],generationConfig:{temperature:.7,maxOutputTokens:80}});
+      const express=key.startsWith('AQ.');
+      const endpoint=express?`https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`:'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+      const headers=express?{'content-type':'application/json'}:{'content-type':'application/json','x-goog-api-key':key};
+      const response=await fetch(endpoint,{method:'POST',headers,body,signal:AbortSignal.timeout(18000)});
+      if(!response.ok){const detail=await response.text();console.error('Gemini request failed',response.status,detail.slice(0,500));return send(res,502,{error:'تعذّر الوصول إلى الذكالي الآن، حاولوا مرة أخرى'})}
       const data=await response.json();
-      const text=(openAi?data?.choices?.[0]?.message?.content:data?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join(''))?.trim()||'لم أستطع تكوين إجابة هذه المرة.';
+      const hint=data?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('').trim();
+      const text=`${hint||'بعد التفكير في الخيارات،'} ترشيحي: ${selectedLetter}${imageQuestion?'':` — ${activeQuestion.options[selected]}`}.`;
       gameState={...gameState,teams:gameState.teams.map(t=>t.id===teamId?{...t,aiUsed:used+1}:t),updated:Date.now()};
       return send(res,200,{text,game:gameState,remaining:2-used});
     }catch{return send(res,500,{error:'حدث خطأ أثناء سؤال الذكالي'})}
