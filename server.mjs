@@ -49,7 +49,7 @@ http.createServer(async(req,res)=>{
       const used=Math.max(Number(gameState.aiUsed)||0,...gameState.teams.map(t=>Number(t.aiUsed)||0));
       if(used>=3)return send(res,409,{error:'استخدمتم فرص المساعدة الثلاث'});
       if(!message?.trim())return send(res,400,{error:'اكتبوا رسالتكم أولًا'});
-      const key=process.env.GEMINI_API_KEY;
+      const key=process.env.GEMINI_API_KEY?.trim();
       if(!key)return send(res,503,{error:'المساعد غير مفعّل حاليًا'});
       const forceWrong=Math.random()<.3;
       const wrongOptions=activeQuestion.options.map((_,i)=>i).filter(i=>i!==activeQuestion.correct);
@@ -58,15 +58,21 @@ http.createServer(async(req,res)=>{
       const imageQuestion=activeQuestion.optionType==='image';
       const optionSummary=imageQuestion?activeQuestion.options.map((_,i)=>`${['أ','ب','ج','د'][i]}: صورة الشعار المرفقة رقم ${i+1}`).join('، '):activeQuestion.options.map((o,i)=>`${['أ','ب','ج','د'][i]}: ${o}`).join('، ');
       const prompt=`أنت مساعد في مسابقة أسرية عربية. السؤال: ${activeQuestion.text}\nالخيارات: ${optionSummary}\nرسالة الأسرة: ${message}\nاكتب تلميحًا عربيًا قصيرًا جدًا يدعم الخيار ${selectedLetter}${imageQuestion?' من الصور المرفقة':`: ${activeQuestion.options[selected]}`}. لا تقل إن الإجابة مفروضة عليك، ولا تذكر أي خيار آخر.`;
-      const parts=[{text:prompt},...(imageQuestion?activeQuestion.options.flatMap((src,i)=>{const match=src.match(/^data:(image\/[^;]+);base64,(.+)$/);return match?[{text:`صورة الخيار ${['أ','ب','ج','د'][i]}`},{inline_data:{mime_type:match[1],data:match[2]}}]:[]}):[])];
+      const parts=[{text:prompt},...(imageQuestion?activeQuestion.options.flatMap((src,i)=>{const match=src.match(/^data:(image\/[^;]+);base64,(.+)$/);return match?[{text:`صورة الخيار ${['أ','ب','ج','د'][i]}`},{inlineData:{mimeType:match[1],data:match[2]}}]:[]}):[])];
       const body=JSON.stringify({contents:[{parts}],generationConfig:{temperature:.7,maxOutputTokens:80}});
       const express=key.startsWith('AQ.');
-      const endpoint=express?`https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`:'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
-      const headers=express?{'content-type':'application/json'}:{'content-type':'application/json','x-goog-api-key':key};
-      const response=await fetch(endpoint,{method:'POST',headers,body,signal:AbortSignal.timeout(18000)});
-      if(!response.ok){const detail=await response.text();console.error('Gemini request failed',response.status,detail.slice(0,500));return send(res,502,{error:'تعذّر الوصول إلى الذكالي الآن، حاولوا مرة أخرى'})}
-      const data=await response.json();
-      const hint=data?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('').trim();
+      const headers={'content-type':'application/json','x-goog-api-key':key};
+      const models=express?['gemini-2.5-flash','gemini-2.5-flash-lite']:['gemini-2.5-flash','gemini-2.0-flash'];
+      let hint='';
+      for(const model of models){
+        const endpoint=express?`https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(key)}`:`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+        try{
+          const response=await fetch(endpoint,{method:'POST',headers,body,signal:AbortSignal.timeout(18000)});
+          if(response.ok){const data=await response.json();hint=data?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('').trim()||'';if(hint)break}
+          else{const detail=await response.text();console.error('Gemini request failed',model,response.status,detail.slice(0,500))}
+        }catch(error){console.error('Gemini connection failed',model,error?.name||'error')}
+      }
+      if(!hint)hint=`التلميح الاحتياطي: ركّزوا على الخيار ${selectedLetter} وقارنوه بالسؤال جيدًا.`;
       const text=`${hint||'بعد التفكير في الخيارات،'} ترشيحي: ${selectedLetter}${imageQuestion?'':` — ${activeQuestion.options[selected]}`}.`;
       gameState={...gameState,aiUsed:used+1,teams:gameState.teams.map(t=>({...t,aiUsed:used+1})),updated:Date.now()};
       return send(res,200,{text,game:gameState,remaining:2-used});
