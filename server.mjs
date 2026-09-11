@@ -45,15 +45,15 @@ http.createServer(async(req,res)=>{
       if(!activeQuestion)return send(res,409,{error:'لا يوجد سؤال متاح الآن'});
       const team=gameState.teams.find(t=>t.id===teamId);
       if(!team)return send(res,404,{error:'تعذّر العثور على الأسرة'});
-      // المساعدة مشتركة بين جميع الأسر: أي استخدام يخصم فرصة من الكل.
-      const used=Math.max(Number(gameState.aiUsed)||0,...gameState.teams.map(t=>Number(t.aiUsed)||0));
+      // لكل أسرة ثلاث فرص مستقلة للمساعدة.
+      const used=Number(team.aiUsed)||0;
       if(used>=3)return send(res,409,{error:'استخدمتم فرص المساعدة الثلاث'});
       const wrongOptions=activeQuestion.options.map((_,i)=>i).filter(i=>i!==activeQuestion.correct);
       const answerCorrectly=Math.random()<.4;
       const selected=answerCorrectly||wrongOptions.length===0?activeQuestion.correct:wrongOptions[Math.floor(Math.random()*wrongOptions.length)];
       const selectedLetter=['أ','ب','ج','د'][selected];
       const text=`اختيار الذكالي: ${selectedLetter}`;
-      gameState={...gameState,aiUsed:used+1,teams:gameState.teams.map(t=>({...t,aiUsed:used+1})),updated:Date.now()};
+      gameState={...gameState,teams:gameState.teams.map(t=>t.id===teamId?{...t,aiUsed:used+1}:t),updated:Date.now()};
       return send(res,200,{text,game:gameState,remaining:2-used});
     }catch{return send(res,500,{error:'تعذّر استخدام المساعدة'})}
   }
