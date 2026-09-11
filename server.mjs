@@ -10,7 +10,20 @@ http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(url.pathname==='/api/game'&&req.method==='GET')return send(res,200,gameState||{});
   if(url.pathname==='/api/game'&&req.method==='POST'){
-    try{let raw='';for await(const chunk of req)raw+=chunk;const incoming=JSON.parse(raw);gameState={...incoming,updated:Date.now()};return send(res,200,gameState)}catch{return send(res,400,{error:'بيانات غير صالحة'})}
+    try{
+      let raw='';for await(const chunk of req)raw+=chunk;const incoming=JSON.parse(raw);
+      if(incoming.phase==='reveal'){
+        if(!gameState)gameState={...incoming,updated:Date.now()};
+        else if(gameState.phase==='question'){
+          const q=incoming.questions[incoming.index];
+          const multiplier=incoming.double?2:1;
+          const submitted=new Map((incoming.teams||[]).map(t=>[t.id,t]));
+          const scored=(gameState.teams||[]).map(team=>{const latest=submitted.get(team.id)||team;const ok=latest.answer===q.correct;return {...team,answer:latest.answer,correct:ok,score:team.score+(ok?multiplier:0)}});
+          gameState={...gameState,...incoming,teams:scored,updated:Date.now()};
+        }
+      }else gameState={...incoming,updated:Date.now()};
+      return send(res,200,gameState)
+    }catch{return send(res,400,{error:'بيانات غير صالحة'})}
   }
   if(url.pathname==='/api/game/join'&&req.method==='POST'){
     try{let raw='';for await(const chunk of req)raw+=chunk;const {team,initial}=JSON.parse(raw);if(!team?.id||!team?.name)return send(res,400,{error:'اسم الأسرة مطلوب'});if(!gameState)gameState={...initial,teams:[],updated:Date.now()};const existing=gameState.teams.find(t=>t.name.trim()===team.name.trim());if(existing)return send(res,200,{game:gameState,team:existing});gameState={...gameState,teams:[...gameState.teams,team],updated:Date.now()};return send(res,200,{game:gameState,team})}catch{return send(res,400,{error:'تعذّر الانضمام'})}
