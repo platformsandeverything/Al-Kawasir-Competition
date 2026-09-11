@@ -59,18 +59,23 @@ http.createServer(async(req,res)=>{
       const optionSummary=imageQuestion?activeQuestion.options.map((_,i)=>`${['أ','ب','ج','د'][i]}: صورة الشعار المرفقة رقم ${i+1}`).join('، '):activeQuestion.options.map((o,i)=>`${['أ','ب','ج','د'][i]}: ${o}`).join('، ');
       const prompt=`أنت مساعد في مسابقة أسرية عربية. السؤال: ${activeQuestion.text}\nالخيارات: ${optionSummary}\nرسالة الأسرة: ${message}\nاكتب تلميحًا عربيًا قصيرًا جدًا يدعم الخيار ${selectedLetter}${imageQuestion?' من الصور المرفقة':`: ${activeQuestion.options[selected]}`}. لا تقل إن الإجابة مفروضة عليك، ولا تذكر أي خيار آخر.`;
       const parts=[{text:prompt},...(imageQuestion?activeQuestion.options.flatMap((src,i)=>{const match=src.match(/^data:(image\/[^;]+);base64,(.+)$/);return match?[{text:`صورة الخيار ${['أ','ب','ج','د'][i]}`},{inlineData:{mimeType:match[1],data:match[2]}}]:[]}):[])];
-      const body=JSON.stringify({contents:[{parts}],generationConfig:{temperature:.7,maxOutputTokens:80}});
+      const body=JSON.stringify({contents:[{role:'user',parts}],generationConfig:{temperature:.7,maxOutputTokens:160}});
       const express=key.startsWith('AQ.');
       const headers={'content-type':'application/json','x-goog-api-key':key};
       const models=express?['gemini-2.5-flash','gemini-2.5-flash-lite']:['gemini-2.5-flash','gemini-2.0-flash'];
+      const providers=express?['vertex-v1','vertex-beta','developer']:['developer','vertex-v1'];
       let hint='';
-      for(const model of models){
-        const endpoint=express?`https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(key)}`:`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+      const deadline=AbortSignal.timeout(18000);
+      for(const provider of providers){
+       for(const model of models){
+        const endpoint=provider==='developer'?`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`:`https://aiplatform.googleapis.com/${provider==='vertex-beta'?'v1beta1':'v1'}/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
         try{
-          const response=await fetch(endpoint,{method:'POST',headers,body,signal:AbortSignal.timeout(18000)});
+          const response=await fetch(endpoint,{method:'POST',headers,body,signal:deadline});
           if(response.ok){const data=await response.json();hint=data?.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('').trim()||'';if(hint)break}
-          else{const detail=await response.text();console.error('Gemini request failed',model,response.status,detail.slice(0,500))}
-        }catch(error){console.error('Gemini connection failed',model,error?.name||'error')}
+          else{const detail=await response.text();console.error('Gemini request failed',provider,model,response.status,detail.slice(0,500))}
+        }catch(error){console.error('Gemini connection failed',provider,model,error?.name||'error')}
+       }
+       if(hint)break;
       }
       if(!hint)hint=`التلميح الاحتياطي: ركّزوا على الخيار ${selectedLetter} وقارنوه بالسؤال جيدًا.`;
       const text=`${hint||'بعد التفكير في الخيارات،'} ترشيحي: ${selectedLetter}${imageQuestion?'':` — ${activeQuestion.options[selected]}`}.`;
